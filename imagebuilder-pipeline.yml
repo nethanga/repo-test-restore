@@ -1,0 +1,843 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: crts
+
+  Env:
+    Type: String
+
+  Area:
+    Type: String
+  
+  InstanceType:
+    Type: String
+    Default: t2.micro
+  
+  ServiceCategory:
+    Type: String
+
+  AvailabilityZone1:
+    Type: String
+
+
+Resources:
+#Network
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.2.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      InstanceTenancy: default
+      Tags:
+      - Key: Application
+        Value: net
+      - Key: Name
+        Value: !Sub ${Prefix}-${Env}-${Area}-ec2-vpc-net-service
+
+  VpcFlowLog:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      LogDestination: !Sub arn:aws:s3:::${Prefix}-sec-${Area}-s3-bucket-sec-raw-audit-${Env}/vpcflowlogs/
+      LogDestinationType: s3
+      LogFormat: '${version} ${account-id} ${interface-id} ${srcaddr} ${dstaddr} ${srcport} ${dstport} ${protocol} ${packets} ${bytes} ${start} ${end} ${action} ${log-status} ${vpc-id} ${subnet-id} ${instance-id} ${region} ${az-id} ${pkt-src-aws-service} ${flow-direction} ${traffic-path}'
+      ResourceId: !Ref Vpc
+      ResourceType: VPC
+      TrafficType: ALL
+      Tags:
+      - Key: Application
+        Value: net
+      - Key: Name
+        Value: !Sub ${Prefix}-${Env}-${Area}-ec2-flowlogs-net-service
+
+  PublicSubnet01:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.2.0.0/24
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Ref AvailabilityZone1
+      MapPublicIpOnLaunch: false
+      Tags:
+      - Key: Application
+        Value: net
+      - Key: Name
+        Value: !Sub ${Prefix}-${Env}-${Area}-ec2-subnet-net-service-public01
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+      - Key: Application
+        Value: net
+      - Key: Name
+        Value: !Sub ${Prefix}-${Env}-${Area}-ec2-igw-net-service
+
+  VpcGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+      - Key: Application
+        Value: net
+      - Key: Name
+        Value: !Sub ${Prefix}-${Env}-${Area}-ec2-rt-net-service-public
+
+  PublicSubnetToInternetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      GatewayId: !Ref InternetGateway
+      DestinationCidrBlock: 0.0.0.0/0
+
+  PublicSubnet01SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet01
+
+  PrivateSubnet01:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.2.64.0/18
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Ref AvailabilityZone1
+      MapPublicIpOnLaunch: false
+      Tags:
+      - Key: Application
+        Value: net
+      - Key: Name
+        Value: !Sub ${Prefix}-${Env}-${Area}-ec2-subnet-net-service-private01
+
+  EipForNatGateway01:
+    Type: AWS::EC2::EIP
+    Properties:
+      Tags:
+      - Key: Application
+        Value: net
+      - Key: Name
+        Value: !Sub ${Prefix}-${Env}-${Area}-ec2-eip-net-ngw01
+
+  NatGatewayForPublicSubnet01:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      SubnetId: !Ref PublicSubnet01
+      AllocationId: !GetAtt EipForNatGateway01.AllocationId
+      Tags:
+      - Key: Application
+        Value: net
+      - Key: Name
+        Value: !Sub ${Prefix}-${Env}-${Area}-ec2-ngw-net-service-az01
+
+  PrivateRouteTable01:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+      - Key: Application
+        Value: net
+      - Key: Name
+        Value: !Sub ${Prefix}-${Env}-${Area}-ec2-rt-net-service-private01
+
+  RouteForNatGateway01:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable01
+      NatGatewayId: !Ref NatGatewayForPublicSubnet01
+      DestinationCidrBlock: 0.0.0.0/0
+
+  PrivateSubnet01SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable01
+      SubnetId: !Ref PrivateSubnet01
+
+  #Security
+  ImagebuilderLifecycleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: imagebuilder.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Description: '-'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/EC2ImageBuilderLifecycleExecutionPolicy
+      MaxSessionDuration: 3600
+      Path: !Sub /${Prefix}/${ServiceCategory}/
+      RoleName: !Sub ${Prefix}-${Env}-${Area}-iam-role-ope-imagebuilder-lifecycle
+      Tags:
+        - Key: Application
+          Value: ope
+        - Key: Name
+          Value: !Sub ${Prefix}-${Env}-${Area}-iam-role-ope-imagebuilder-lifecycle
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: Should be explicit name by naming conventions
+
+  ImagebuilderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Description: '-'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      MaxSessionDuration: 3600
+      Path: !Sub /${Prefix}/${ServiceCategory}/
+      Policies:
+        - PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: AllowGetImagebuilderComponent
+                Effect: Allow
+                Action:
+                  - imagebuilder:GetComponent
+                Resource: 
+                  - '*'
+          PolicyName: !Sub ${Prefix}-${Env}-${Area}-iam-policy-ope-imagebuilder
+      RoleName: !Sub ${Prefix}-${Env}-${Area}-iam-role-ope-imagebuilder
+      Tags:
+        - Key: Application
+          Value: ope
+        - Key: Name
+          Value: !Sub ${Prefix}-${Env}-${Area}-iam-role-ope-imagebuilder
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: Should be explicit name by naming conventions
+          - id: W11
+            reason: IAM role should not allow * resource on its permissions policy
+
+  ImagebuilderSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: '-'
+      GroupName: !Sub ${Prefix}-${Env}-${Area}-ec2-sg-ope-imagebuilder
+      Tags:
+        - Key: Name
+          Value: !Sub ${Prefix}-${Env}-${Area}-ec2-sg-ope-imagebuilder
+      VpcId: !Ref Vpc
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: Should be explicit name by naming conventions
+          - id: F1000
+            reason: Egress rule is not controlled by design.
+  
+  ImagebuilderProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub ${Prefix}-${Env}-${Area}-iam-profile-ope-imagebuilder
+      Roles: 
+        - !Ref ImagebuilderRole
+
+  #Image Builder Pipeline
+  ImagebuilderComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-component
+      Platform: Linux
+      Version: 1.0.0
+      Description: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-component
+      Tags:
+        Application: ope
+        Name: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-component
+      Data: |
+        name: BastionServerSetup
+        description: BastionServerSetup
+        schemaVersion: 1.0
+
+        phases:
+          - name: build
+            steps:
+              - name: YumUpdate
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum -y update
+              - name: InstallPackage
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum -y install mysql openssl gcc
+              - name: Mysql-default-character-set
+                action: ExecuteBash
+                inputs:
+                  commands: 
+                    - sudo sed -i -e 's/#default-character-set=/default-character-set=utf8mb4/' /etc/my.cnf
+              - name: delete-ec2-user
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo userdel -r ec2-user
+
+  ImagebuilderImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-imagerecipe
+      Version: '1.0.0'
+      ParentImage: !Sub arn:${AWS::Partition}:imagebuilder:${AWS::Region}:aws:image/amazon-linux-2-x86/x.x.x
+      Description: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-imagerecipe
+      Components:
+        - ComponentArn: !Ref ImagebuilderComponent
+      Tags:
+        Application: ope
+        Name: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-imagerecipe
+
+  ImagebuilderInfrastructureConfiguration:
+    Type: AWS::ImageBuilder::InfrastructureConfiguration
+    Properties:
+      Name: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-infrastructureconfiguration
+      InstanceProfileName: !Ref ImagebuilderProfile
+      Description: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-infrastructureconfiguration
+      InstanceTypes:
+        - !Ref InstanceType
+      TerminateInstanceOnFailure: TRUE
+      SecurityGroupIds:
+        - !Ref ImagebuilderSecurityGroup
+      SubnetId: !Ref PrivateSubnet01
+      Tags:
+        Application: ope
+        Name: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-infrastructureconfiguration
+ 
+  ImagebuilderDistributionConfiguration: 
+    Type: AWS::ImageBuilder::DistributionConfiguration
+    Properties:
+      Description: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-distributionconfiguration
+      Distributions: 
+        - AmiDistributionConfiguration: 
+            AmiTags: 
+              Application: ope
+              Name: !Sub ${Prefix}-${Env}-aps1-bastion-image
+            Description: !Sub ${Prefix}-${Env}-aps1-bastion-image
+            Name: !Sub ${Prefix}-${Env}-aps1-bastion-image-{{ imagebuilder:buildDate }}
+            LaunchPermissionConfiguration:
+              UserIds:
+                - 882156144352
+          Region: us-east-1
+      Name: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-distributionconfiguration
+      Tags:
+        Application: ope
+        Name: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-distributionconfiguration
+
+  ImagebuilderPipeline:
+    Type: AWS::ImageBuilder::ImagePipeline
+    Properties: 
+      Description: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-pipeline
+      DistributionConfigurationArn: !Ref ImagebuilderDistributionConfiguration
+      EnhancedImageMetadataEnabled: true
+      ImageRecipeArn: !Ref ImagebuilderImageRecipe
+      ImageScanningConfiguration: 
+        ImageScanningEnabled: false        
+      InfrastructureConfigurationArn: !Ref ImagebuilderInfrastructureConfiguration
+      Name: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-pipeline
+      Status: ENABLED
+      Tags:
+        Application: ope
+        Name: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-pipeline
+
+  ImagebuilderLifecyclePolicy: 
+    Type: AWS::ImageBuilder::LifecyclePolicy
+    Properties:
+      Description: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-lifecyclepolicy
+      ExecutionRole: !GetAtt ImagebuilderLifecycleRole.Arn
+      Name: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-lifecyclepolicy
+      PolicyDetails: 
+        - Action: 
+            Type: DELETE
+          Filter: 
+            Type: COUNT
+            Value: 3
+      ResourceSelection: 
+        Recipes: 
+        - Name: !GetAtt ImagebuilderImageRecipe.Name
+          SemanticVersion: 1.0.0
+      ResourceType: AMI_IMAGE
+      Status: ENABLED
+      Tags:
+        Application: ope
+        Name: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-lifecyclepolicy
+
+Outputs:
+  Vpc:
+    Value: !Ref Vpc
+    Export:
+      Name: !Sub ${Prefix}-${Env}-${Area}-ec2-vpc-net-service
+
+  VpcFlowLog:
+    Value: !Ref VpcFlowLog
+    Export:
+      Name: !Sub ${Prefix}-${Env}-${Area}-ec2-vpc-net-flowlog
+
+  NatGatewayForPublicSubnet01:
+    Value: !Ref NatGatewayForPublicSubnet01
+    Export:
+      Name: !Sub ${Prefix}-${Env}-${Area}-ec2-ngw-net-service-az01
+
+  PublicRouteTable:
+    Value: !Ref PublicRouteTable
+    Export:
+      Name: !Sub ${Prefix}-${Env}-${Area}-ec2-rt-net-service-public
+
+  PrivateRouteTable01:
+    Value: !Ref PrivateRouteTable01
+    Export:
+      Name: !Sub ${Prefix}-${Env}-${Area}-ec2-rt-net-service-private01
+
+  EipForNatGateway01:
+    Value: !Ref EipForNatGateway01
+    Export:
+      Name: !Sub ${Prefix}-${Env}-${Area}-ec2-eip-net-ngw01
+
+  PublicSubnet01:
+    Value: !Ref PublicSubnet01
+    Export:
+      Name: !Sub ${Prefix}-${Env}-${Area}-ec2-subnet-net-service-public01
+
+  PrivateSubnet01:
+    Value: !Ref PrivateSubnet01
+    Export:
+      Name: !Sub ${Prefix}-${Env}-${Area}-ec2-subnet-net-service-private01AWSTemplateFormatVersion: 2010-09-09
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: crts
+
+  Env:
+    Type: String
+
+  Area:
+    Type: String
+  
+  InstanceType:
+    Type: String
+    Default: t2.micro
+  
+  ServiceCategory:
+    Type: String
+
+  AvailabilityZone1:
+    Type: String
+
+
+Resources:
+#Network
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.2.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      InstanceTenancy: default
+      Tags:
+      - Key: Application
+        Value: net
+      - Key: Name
+        Value: !Sub ${Prefix}-${Env}-${Area}-ec2-vpc-net-service
+
+  VpcFlowLog:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      LogDestination: !Sub arn:aws:s3:::${Prefix}-sec-${Area}-s3-bucket-sec-raw-audit-${Env}/vpcflowlogs/
+      LogDestinationType: s3
+      LogFormat: '${version} ${account-id} ${interface-id} ${srcaddr} ${dstaddr} ${srcport} ${dstport} ${protocol} ${packets} ${bytes} ${start} ${end} ${action} ${log-status} ${vpc-id} ${subnet-id} ${instance-id} ${region} ${az-id} ${pkt-src-aws-service} ${flow-direction} ${traffic-path}'
+      ResourceId: !Ref Vpc
+      ResourceType: VPC
+      TrafficType: ALL
+      Tags:
+      - Key: Application
+        Value: net
+      - Key: Name
+        Value: !Sub ${Prefix}-${Env}-${Area}-ec2-flowlogs-net-service
+
+  PublicSubnet01:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.2.0.0/24
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Ref AvailabilityZone1
+      MapPublicIpOnLaunch: false
+      Tags:
+      - Key: Application
+        Value: net
+      - Key: Name
+        Value: !Sub ${Prefix}-${Env}-${Area}-ec2-subnet-net-service-public01
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+      - Key: Application
+        Value: net
+      - Key: Name
+        Value: !Sub ${Prefix}-${Env}-${Area}-ec2-igw-net-service
+
+  VpcGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+      - Key: Application
+        Value: net
+      - Key: Name
+        Value: !Sub ${Prefix}-${Env}-${Area}-ec2-rt-net-service-public
+
+  PublicSubnetToInternetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      GatewayId: !Ref InternetGateway
+      DestinationCidrBlock: 0.0.0.0/0
+
+  PublicSubnet01SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet01
+
+  PrivateSubnet01:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.2.64.0/18
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Ref AvailabilityZone1
+      MapPublicIpOnLaunch: false
+      Tags:
+      - Key: Application
+        Value: net
+      - Key: Name
+        Value: !Sub ${Prefix}-${Env}-${Area}-ec2-subnet-net-service-private01
+
+  EipForNatGateway01:
+    Type: AWS::EC2::EIP
+    Properties:
+      Tags:
+      - Key: Application
+        Value: net
+      - Key: Name
+        Value: !Sub ${Prefix}-${Env}-${Area}-ec2-eip-net-ngw01
+
+  NatGatewayForPublicSubnet01:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      SubnetId: !Ref PublicSubnet01
+      AllocationId: !GetAtt EipForNatGateway01.AllocationId
+      Tags:
+      - Key: Application
+        Value: net
+      - Key: Name
+        Value: !Sub ${Prefix}-${Env}-${Area}-ec2-ngw-net-service-az01
+
+  PrivateRouteTable01:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+      - Key: Application
+        Value: net
+      - Key: Name
+        Value: !Sub ${Prefix}-${Env}-${Area}-ec2-rt-net-service-private01
+
+  RouteForNatGateway01:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable01
+      NatGatewayId: !Ref NatGatewayForPublicSubnet01
+      DestinationCidrBlock: 0.0.0.0/0
+
+  PrivateSubnet01SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable01
+      SubnetId: !Ref PrivateSubnet01
+
+  #Security
+  ImagebuilderLifecycleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: imagebuilder.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Description: '-'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/EC2ImageBuilderLifecycleExecutionPolicy
+      MaxSessionDuration: 3600
+      Path: !Sub /${Prefix}/${ServiceCategory}/
+      RoleName: !Sub ${Prefix}-${Env}-${Area}-iam-role-ope-imagebuilder-lifecycle
+      Tags:
+        - Key: Application
+          Value: ope
+        - Key: Name
+          Value: !Sub ${Prefix}-${Env}-${Area}-iam-role-ope-imagebuilder-lifecycle
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: Should be explicit name by naming conventions
+
+  ImagebuilderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Description: '-'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      MaxSessionDuration: 3600
+      Path: !Sub /${Prefix}/${ServiceCategory}/
+      Policies:
+        - PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: AllowGetImagebuilderComponent
+                Effect: Allow
+                Action:
+                  - imagebuilder:GetComponent
+                Resource: 
+                  - '*'
+          PolicyName: !Sub ${Prefix}-${Env}-${Area}-iam-policy-ope-imagebuilder
+      RoleName: !Sub ${Prefix}-${Env}-${Area}-iam-role-ope-imagebuilder
+      Tags:
+        - Key: Application
+          Value: ope
+        - Key: Name
+          Value: !Sub ${Prefix}-${Env}-${Area}-iam-role-ope-imagebuilder
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: Should be explicit name by naming conventions
+          - id: W11
+            reason: IAM role should not allow * resource on its permissions policy
+
+  ImagebuilderSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: '-'
+      GroupName: !Sub ${Prefix}-${Env}-${Area}-ec2-sg-ope-imagebuilder
+      Tags:
+        - Key: Name
+          Value: !Sub ${Prefix}-${Env}-${Area}-ec2-sg-ope-imagebuilder
+      VpcId: !Ref Vpc
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: Should be explicit name by naming conventions
+          - id: F1000
+            reason: Egress rule is not controlled by design.
+  
+  ImagebuilderProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub ${Prefix}-${Env}-${Area}-iam-profile-ope-imagebuilder
+      Roles: 
+        - !Ref ImagebuilderRole
+
+  #Image Builder Pipeline
+  ImagebuilderComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-component
+      Platform: Linux
+      Version: 1.0.0
+      Description: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-component
+      Tags:
+        Application: ope
+        Name: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-component
+      Data: |
+        name: BastionServerSetup
+        description: BastionServerSetup
+        schemaVersion: 1.0
+
+        phases:
+          - name: build
+            steps:
+              - name: YumUpdate
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum -y update
+              - name: InstallPackage
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum -y install mysql openssl gcc
+              - name: Mysql-default-character-set
+                action: ExecuteBash
+                inputs:
+                  commands: 
+                    - sudo sed -i -e 's/#default-character-set=/default-character-set=utf8mb4/' /etc/my.cnf
+              - name: delete-ec2-user
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo userdel -r ec2-user
+
+  ImagebuilderImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-imagerecipe
+      Version: '1.0.0'
+      ParentImage: !Sub arn:${AWS::Partition}:imagebuilder:${AWS::Region}:aws:image/amazon-linux-2-x86/x.x.x
+      Description: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-imagerecipe
+      Components:
+        - ComponentArn: !Ref ImagebuilderComponent
+      Tags:
+        Application: ope
+        Name: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-imagerecipe
+
+  ImagebuilderInfrastructureConfiguration:
+    Type: AWS::ImageBuilder::InfrastructureConfiguration
+    Properties:
+      Name: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-infrastructureconfiguration
+      InstanceProfileName: !Ref ImagebuilderProfile
+      Description: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-infrastructureconfiguration
+      InstanceTypes:
+        - !Ref InstanceType
+      TerminateInstanceOnFailure: TRUE
+      SecurityGroupIds:
+        - !Ref ImagebuilderSecurityGroup
+      SubnetId: !Ref PrivateSubnet01
+      Tags:
+        Application: ope
+        Name: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-infrastructureconfiguration
+ 
+  ImagebuilderDistributionConfiguration: 
+    Type: AWS::ImageBuilder::DistributionConfiguration
+    Properties:
+      Description: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-distributionconfiguration
+      Distributions: 
+        - AmiDistributionConfiguration: 
+            AmiTags: 
+              Application: ope
+              Name: !Sub ${Prefix}-${Env}-aps1-bastion-image
+            Description: !Sub ${Prefix}-${Env}-aps1-bastion-image
+            Name: !Sub ${Prefix}-${Env}-aps1-bastion-image-{{ imagebuilder:buildDate }}
+            LaunchPermissionConfiguration:
+              UserIds:
+                - 882156144352
+          Region: us-east-1
+      Name: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-distributionconfiguration
+      Tags:
+        Application: ope
+        Name: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-distributionconfiguration
+
+  ImagebuilderPipeline:
+    Type: AWS::ImageBuilder::ImagePipeline
+    Properties: 
+      Description: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-pipeline
+      DistributionConfigurationArn: !Ref ImagebuilderDistributionConfiguration
+      EnhancedImageMetadataEnabled: true
+      ImageRecipeArn: !Ref ImagebuilderImageRecipe
+      ImageScanningConfiguration: 
+        ImageScanningEnabled: false        
+      InfrastructureConfigurationArn: !Ref ImagebuilderInfrastructureConfiguration
+      Name: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-pipeline
+      Status: ENABLED
+      Tags:
+        Application: ope
+        Name: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-pipeline
+
+  ImagebuilderLifecyclePolicy: 
+    Type: AWS::ImageBuilder::LifecyclePolicy
+    Properties:
+      Description: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-lifecyclepolicy
+      ExecutionRole: !GetAtt ImagebuilderLifecycleRole.Arn
+      Name: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-lifecyclepolicy
+      PolicyDetails: 
+        - Action: 
+            Type: DELETE
+          Filter: 
+            Type: COUNT
+            Value: 3
+      ResourceSelection: 
+        Recipes: 
+        - Name: !GetAtt ImagebuilderImageRecipe.Name
+          SemanticVersion: 1.0.0
+      ResourceType: AMI_IMAGE
+      Status: ENABLED
+      Tags:
+        Application: ope
+        Name: !Sub ${Prefix}-${Env}-${Area}-imagebuilder-lifecyclepolicy
+
+Outputs:
+  Vpc:
+    Value: !Ref Vpc
+    Export:
+      Name: !Sub ${Prefix}-${Env}-${Area}-ec2-vpc-net-service
+
+  VpcFlowLog:
+    Value: !Ref VpcFlowLog
+    Export:
+      Name: !Sub ${Prefix}-${Env}-${Area}-ec2-vpc-net-flowlog
+
+  NatGatewayForPublicSubnet01:
+    Value: !Ref NatGatewayForPublicSubnet01
+    Export:
+      Name: !Sub ${Prefix}-${Env}-${Area}-ec2-ngw-net-service-az01
+
+  PublicRouteTable:
+    Value: !Ref PublicRouteTable
+    Export:
+      Name: !Sub ${Prefix}-${Env}-${Area}-ec2-rt-net-service-public
+
+  PrivateRouteTable01:
+    Value: !Ref PrivateRouteTable01
+    Export:
+      Name: !Sub ${Prefix}-${Env}-${Area}-ec2-rt-net-service-private01
+
+  EipForNatGateway01:
+    Value: !Ref EipForNatGateway01
+    Export:
+      Name: !Sub ${Prefix}-${Env}-${Area}-ec2-eip-net-ngw01
+
+  PublicSubnet01:
+    Value: !Ref PublicSubnet01
+    Export:
+      Name: !Sub ${Prefix}-${Env}-${Area}-ec2-subnet-net-service-public01
+
+  PrivateSubnet01:
+    Value: !Ref PrivateSubnet01
+    Export:
+      Name: !Sub ${Prefix}-${Env}-${Area}-ec2-subnet-net-service-private01
